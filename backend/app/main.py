@@ -1,0 +1,132 @@
+from pathlib import Path
+
+import redis
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile, status
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.analysis_service import AnalysisService
+from app.config import load_config
+from app.db import AnalysisRecord, UploadedImage, make_session_factory
+from app.poi_service import PoiService
+from app.schemas import AnalysisRequest, AnalysisResult, ImageUploadResponse, NearbyPoiRequest, PoiCandidate
+from app.security import SecurityService, get_client_identity
+from app.storage import LocalImageStorage, StorageError
+
+
+def create_app(
+    testing: bool = False,
+    storage_root: str | Path | None = None,
+    rate_limit_per_minute: int | None = None,
+) -> FastAPI:
+    config = load_config()
+    if testing:
+        config.providers.use_mock_models = True
+        config.security.client_keys = ["dev-client-key"]
+    if storage_root is not None:
+        config.storage.root_dir = str(storage_root)
+    if rate_limit_per_minute is not None:
+        config.security.rate_limit_per_minute = rate_limit_per_minute
+
+    app = FastAPI(title=config.app_name)
+    storage = LocalImageStorage(config.storage.root_dir, config.storage.max_bytes)
+    analysis_service = AnalysisService.mocked() if testing else AnalysisService.from_config(config.providers)
+    poi_service = PoiService(config.providers)
+    session_factory: sessionmaker[Session] | None = None if testing else make_session_factory(config.database)
+    redis_client = None if testing else redis.Redis.from_url(config.redis.url, decode_responses=True)
+    security_service = SecurityService(config.security, redis_client=redis_client)
+    image_index: dict[str, ImageUploadResponse] = {}
+
+    def get_db() -> Session | None:
+        if session_factory is None:
+            yield None
+            return
+        db = session_factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    def protect(route_name: str, count_daily_analysis: bool = False):
+        async def dependency(
+            request: Request,
+            client_key_header: str | None = Header(default=None, alias=config.security.header_name),
+        ) -> str:
+            client_key = security_service.require_api_key(client_key_header)
+            identity = get_client_identity(request, client_key)
+            security_service.check_minute_limit(identity, route_name)
+            if count_daily_analysis:
+                security_service.check_daily_analysis_limit(identity)
+            return client_key
+
+        return dependency
+
+    @app.get("/health")
+    def health() -> dict:
+        dependencies = {"mysql": "skipped" if testing else "ok", "redis": "skipped" if testing else "ok"}
+        if redis_client is not None:
+            try:
+                redis_client.ping()
+            except Exception:
+                dependencies["redis"] = "error"
+        return {"status": "ok", "dependencies": dependencies}
+
+    @app.post("/api/v1/images", response_model=ImageUploadResponse, status_code=status.HTTP_201_CREATED)
+    async def upload_image(
+        file: UploadFile = File(...),
+        _: str = Depends(protect("upload_image")),
+        db: Session | None = Depends(get_db),
+    ):
+        data = await file.read()
+        try:
+            saved = storage.save_upload(file.filename or "upload", file.content_type or "", data)
+        except StorageError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        response = ImageUploadResponse(**saved.__dict__)
+        image_index[response.image_id] = response
+        if db is not None:
+            db.add(
+                UploadedImage(
+                    image_id=response.image_id,
+                    relative_path=response.relative_path,
+                    content_type=response.content_type,
+                    size_bytes=response.size_bytes,
+                )
+            )
+            db.commit()
+        return response
+
+    @app.post("/api/v1/analyses", response_model=AnalysisResult)
+    async def analyze(
+        request: AnalysisRequest,
+        _: str = Depends(protect("analyze", count_daily_analysis=True)),
+        db: Session | None = Depends(get_db),
+    ):
+        if request.image_id in image_index and not Path(request.image_path).exists():
+            request.image_path = str(storage.absolute_path(image_index[request.image_id].relative_path))
+
+        result = await analysis_service.analyze(request)
+        if db is not None:
+            db.add(
+                AnalysisRecord(
+                    image_id=request.image_id,
+                    request_json=request.model_dump_json(),
+                    result_json=result.model_dump_json(),
+                )
+            )
+            db.commit()
+        return result
+
+    @app.post("/api/v1/locations/nearby", response_model=list[PoiCandidate])
+    async def nearby_pois(
+        request: NearbyPoiRequest,
+        _: str = Depends(protect("nearby_pois")),
+    ):
+        return await poi_service.nearby(request)
+
+    @app.post("/api/v1/storage/cleanup")
+    def cleanup_storage(_: str = Depends(protect("cleanup_storage"))) -> dict:
+        removed = storage.cleanup_expired(config.storage.keep_days)
+        return {"removed": removed, "keep_days": config.storage.keep_days}
+
+    return app

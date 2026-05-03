@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime storage
+backend/storage/
+storage/
+
+# Local secrets and overrides
+backend/config/app.local.yml
+backend/config/*.secret.yml
+.env
+.env.*
+
+# Godot/editor generated files
+.godot/
+addons/
+*.tscn
+project.godot
+icon.svg
+icon.svg.import
+
+# Old root-level compose experiments; backend/docker-compose.yaml is the deploy file.
+/docker-compose.yml
+/docker-compose.yaml
+
+# Superpowers scratch files
+.superpowers/
