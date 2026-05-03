@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.providers import ProviderTimeoutError
 
 
 def test_health_endpoint_reports_dependencies():
@@ -61,3 +62,25 @@ def test_analyze_endpoint_returns_mvp_fields(tmp_path: Path):
     assert body["total_calories_range"]
     assert body["total_cost_range"]
     assert body["restaurant_summary"] is None
+
+
+def test_analyze_endpoint_returns_504_when_model_provider_times_out(tmp_path: Path):
+    class TimeoutAnalysisService:
+        async def analyze(self, request):
+            raise ProviderTimeoutError("qwen vision request timed out")
+
+    app = create_app(testing=True, storage_root=tmp_path, analysis_service=TimeoutAnalysisService())
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/analyses",
+        headers={"X-Client-Key": "dev-client-key"},
+        json={
+            "image_id": "img_timeout",
+            "image_path": str(tmp_path / "missing.jpg"),
+            "user_profile": {},
+            "location_choice": {"kind": "home"},
+        },
+    )
+
+    assert response.status_code == 504
+    assert response.json()["detail"] == "qwen vision request timed out"

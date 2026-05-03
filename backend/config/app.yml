@@ -22,7 +22,7 @@ providers:
   qwen_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   qwen_vision_model: qwen3.6-plus
   amap_key: ""
-  request_timeout_seconds: 45
+  request_timeout_seconds: 120
 
 security:
   enabled: true

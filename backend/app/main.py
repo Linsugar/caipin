@@ -8,6 +8,7 @@ from app.analysis_service import AnalysisService
 from app.config import load_config
 from app.db import AnalysisRecord, UploadedImage, make_session_factory
 from app.poi_service import PoiService
+from app.providers import ProviderHTTPError, ProviderTimeoutError
 from app.schemas import AnalysisRequest, AnalysisResult, ImageUploadResponse, NearbyPoiRequest, PoiCandidate
 from app.security import SecurityService, get_client_identity
 from app.storage import LocalImageStorage, StorageError
@@ -17,6 +18,7 @@ def create_app(
     testing: bool = False,
     storage_root: str | Path | None = None,
     rate_limit_per_minute: int | None = None,
+    analysis_service: AnalysisService | None = None,
 ) -> FastAPI:
     config = load_config()
     if testing:
@@ -29,7 +31,7 @@ def create_app(
 
     app = FastAPI(title=config.app_name)
     storage = LocalImageStorage(config.storage.root_dir, config.storage.max_bytes)
-    analysis_service = AnalysisService.mocked() if testing else AnalysisService.from_config(config.providers)
+    analysis_service = analysis_service or (AnalysisService.mocked() if testing else AnalysisService.from_config(config.providers))
     poi_service = PoiService(config.providers)
     session_factory: sessionmaker[Session] | None = None if testing else make_session_factory(config.database)
     redis_client = None if testing else redis.Redis.from_url(config.redis.url, decode_responses=True)
@@ -105,7 +107,12 @@ def create_app(
         if request.image_id in image_index and not Path(request.image_path).exists():
             request.image_path = str(storage.absolute_path(image_index[request.image_id].relative_path))
 
-        result = await analysis_service.analyze(request)
+        try:
+            result = await analysis_service.analyze(request)
+        except ProviderTimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except ProviderHTTPError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         if db is not None:
             db.add(
                 AnalysisRecord(

@@ -8,6 +8,18 @@ from app.config import ProviderConfig
 from app.schemas import BoundingBox, FoodItem
 
 
+class ProviderError(RuntimeError):
+    pass
+
+
+class ProviderTimeoutError(ProviderError):
+    pass
+
+
+class ProviderHTTPError(ProviderError):
+    pass
+
+
 def _parse_json_content(content: object) -> Any:
     if isinstance(content, dict):
         return content
@@ -228,31 +240,36 @@ class QwenVisionProvider(VisionProvider):
 
         image_bytes = Path(image_path).read_bytes()
         # MVP 先保留真实接入位置；不同百炼视觉模型的图片格式细节可按开通模型再微调。
-        async with httpx.AsyncClient(timeout=self.config.request_timeout_seconds, trust_env=False) as client:
-            response = await client.post(
-                f"{self.config.qwen_base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {self.config.qwen_api_key}"},
-                json={
-                    "model": self.config.qwen_vision_model,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "识别图片中的菜品，返回 JSON，包含 name,bbox,confidence,ingredients_guess,cooking_method_guess,portion_guess。"},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": "data:image/jpeg;base64,"
-                                        + __import__("base64").b64encode(image_bytes).decode("ascii")
+        try:
+            async with httpx.AsyncClient(timeout=self.config.request_timeout_seconds, trust_env=False) as client:
+                response = await client.post(
+                    f"{self.config.qwen_base_url.rstrip('/')}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.config.qwen_api_key}"},
+                    json={
+                        "model": self.config.qwen_vision_model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "识别图片中的菜品，返回 JSON，包含 name,bbox,confidence,ingredients_guess,cooking_method_guess,portion_guess。"},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": "data:image/jpeg;base64,"
+                                            + __import__("base64").b64encode(image_bytes).decode("ascii")
+                                        },
                                     },
-                                },
-                            ],
-                        }
-                    ],
-                    "response_format": {"type": "json_object"},
-                },
-            )
-            response.raise_for_status()
+                                ],
+                            }
+                        ],
+                        "response_format": {"type": "json_object"},
+                    },
+                )
+                response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeoutError("qwen vision request timed out") from exc
+        except httpx.HTTPStatusError as exc:
+            raise ProviderHTTPError(f"qwen vision request failed: {exc.response.text[:500]}") from exc
         content = response.json()["choices"][0]["message"]["content"]
         parsed = _parse_json_content(content)
         foods = normalize_vision_foods(parsed)
@@ -269,19 +286,24 @@ class DeepSeekReasoningProvider(ReasoningProvider):
         if not self.config.deepseek_api_key:
             return await MockReasoningProvider().summarize_analysis(payload)
 
-        async with httpx.AsyncClient(timeout=self.config.request_timeout_seconds, trust_env=False) as client:
-            response = await client.post(
-                f"{self.config.deepseek_base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {self.config.deepseek_api_key}"},
-                json={
-                    "model": self.config.deepseek_model,
-                    "messages": [
-                        {"role": "system", "content": "你是饮食分析后端，只输出符合约定 schema 的 JSON。健康建议必须谨慎，不做医疗诊断。"},
-                        {"role": "user", "content": str(payload)},
-                    ],
-                    "response_format": {"type": "json_object"},
-                },
-            )
-            response.raise_for_status()
+        try:
+            async with httpx.AsyncClient(timeout=self.config.request_timeout_seconds, trust_env=False) as client:
+                response = await client.post(
+                    f"{self.config.deepseek_base_url.rstrip('/')}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.config.deepseek_api_key}"},
+                    json={
+                        "model": self.config.deepseek_model,
+                        "messages": [
+                            {"role": "system", "content": "你是饮食分析后端，只输出符合约定 schema 的 JSON。健康建议必须谨慎，不做医疗诊断。"},
+                            {"role": "user", "content": str(payload)},
+                        ],
+                        "response_format": {"type": "json_object"},
+                    },
+                )
+                response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeoutError("deepseek reasoning request timed out") from exc
+        except httpx.HTTPStatusError as exc:
+            raise ProviderHTTPError(f"deepseek reasoning request failed: {exc.response.text[:500]}") from exc
         content = response.json()["choices"][0]["message"]["content"]
         return normalize_reasoning_summary(_parse_json_content(content), payload)
