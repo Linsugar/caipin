@@ -42,6 +42,27 @@ security:
 {"detail": "daily analysis limit exceeded"}
 ```
 
+## 日志
+
+后端默认会在容器日志中打印请求和响应：
+
+```text
+HTTP_REQUEST ...
+HTTP_RESPONSE ...
+QWEN_REQUEST ...
+QWEN_RESPONSE ...
+DEEPSEEK_REQUEST ...
+DEEPSEEK_RESPONSE ...
+```
+
+敏感信息会脱敏，图片 base64 不会完整打印。
+
+查看日志：
+
+```bash
+docker logs -f --tail 200 food-analysis-api
+```
+
 ## GET /health
 
 检查服务状态。

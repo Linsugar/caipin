@@ -32,3 +32,8 @@ security:
   header_name: X-Client-Key
   rate_limit_per_minute: 30
   analysis_limit_per_day: 200
+
+logging:
+  print_request_response: true
+  print_model_request_response: true
+  max_body_chars: 4000

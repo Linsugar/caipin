@@ -1,12 +1,15 @@
 from pathlib import Path
 
 import redis
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile, status
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import StreamingResponse
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.analysis_service import AnalysisService
 from app.config import load_config
 from app.db import AnalysisRecord, UploadedImage, make_session_factory
+from app.logging_utils import log_json, logger, truncate_for_log
 from app.poi_service import PoiService
 from app.providers import ProviderHTTPError, ProviderTimeoutError
 from app.schemas import AnalysisRequest, AnalysisResult, ImageUploadResponse, NearbyPoiRequest, PoiCandidate
@@ -30,6 +33,8 @@ def create_app(
         config.security.rate_limit_per_minute = rate_limit_per_minute
 
     app = FastAPI(title=config.app_name)
+    if config.logging.print_request_response:
+        app.add_middleware(RequestResponseLoggingMiddleware, max_body_chars=config.logging.max_body_chars)
     storage = LocalImageStorage(config.storage.root_dir, config.storage.max_bytes)
     analysis_service = analysis_service or (AnalysisService.mocked() if testing else AnalysisService.from_config(config.providers))
     poi_service = PoiService(config.providers)
@@ -137,3 +142,50 @@ def create_app(
         return {"removed": removed, "keep_days": config.storage.keep_days}
 
     return app
+
+
+class RequestResponseLoggingMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, max_body_chars: int = 4000) -> None:
+        super().__init__(app)
+        self.max_body_chars = max_body_chars
+
+    async def dispatch(self, request: Request, call_next):
+        body = await request.body()
+        content_type = request.headers.get("content-type", "")
+        request_preview = {
+            "method": request.method,
+            "path": request.url.path,
+            "query": str(request.url.query),
+            "headers": {
+                key: value
+                for key, value in request.headers.items()
+                if key.lower() in {"content-type", "content-length", "x-client-key", "user-agent"}
+            },
+            "body": f"<multipart:{len(body)} bytes>" if "multipart/form-data" in content_type else truncate_for_log(body.decode("utf-8", errors="replace"), self.max_body_chars),
+        }
+        log_json("HTTP_REQUEST", request_preview, self.max_body_chars)
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        response = await call_next(Request(request.scope, receive))
+        response_body = b""
+        async for chunk in response.body_iterator:
+            response_body += chunk
+
+        response_preview = {
+            "status_code": response.status_code,
+            "headers": {
+                key: value
+                for key, value in response.headers.items()
+                if key.lower() in {"content-type", "content-length"}
+            },
+            "body": truncate_for_log(response_body.decode("utf-8", errors="replace"), self.max_body_chars),
+        }
+        log_json("HTTP_RESPONSE", response_preview, self.max_body_chars)
+        return Response(
+            content=response_body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )

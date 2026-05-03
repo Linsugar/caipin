@@ -40,6 +40,12 @@ class SecurityConfig(BaseModel):
     analysis_limit_per_day: int = 200
 
 
+class LoggingConfig(BaseModel):
+    print_request_response: bool = True
+    print_model_request_response: bool = True
+    max_body_chars: int = 4000
+
+
 class AppConfig(BaseModel):
     app_name: str = "food-analysis-backend"
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -47,6 +53,7 @@ class AppConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     providers: ProviderConfig = Field(default_factory=ProviderConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
