@@ -49,7 +49,6 @@ def test_analyze_endpoint_returns_mvp_fields(tmp_path: Path):
         headers={"X-Client-Key": "dev-client-key"},
         json={
             "image_id": upload["image_id"],
-            "image_path": str(tmp_path / upload["relative_path"]),
             "user_profile": {"conditions": ["diabetes"], "goals": ["控糖"]},
             "location_choice": {"kind": "home"},
         },
@@ -66,17 +65,22 @@ def test_analyze_endpoint_returns_mvp_fields(tmp_path: Path):
 
 def test_analyze_endpoint_returns_504_when_model_provider_times_out(tmp_path: Path):
     class TimeoutAnalysisService:
-        async def analyze(self, request):
+        async def analyze(self, request, image_path: str):
             raise ProviderTimeoutError("qwen vision request timed out")
 
     app = create_app(testing=True, storage_root=tmp_path, analysis_service=TimeoutAnalysisService())
     client = TestClient(app)
+    # Upload an image first so the image_index lookup succeeds
+    upload = client.post(
+        "/api/v1/images",
+        headers={"X-Client-Key": "dev-client-key"},
+        files={"file": ("food.jpg", b"fake-image", "image/jpeg")},
+    ).json()
     response = client.post(
         "/api/v1/analyses",
         headers={"X-Client-Key": "dev-client-key"},
         json={
-            "image_id": "img_timeout",
-            "image_path": str(tmp_path / "missing.jpg"),
+            "image_id": upload["image_id"],
             "user_profile": {},
             "location_choice": {"kind": "home"},
         },

@@ -14,13 +14,13 @@ storage:
 providers:
   # 改成 false 后会调用真实 DeepSeek / 千问 / 高德接口。
   # 如果只是本地跑通接口，可临时改回 true。
-  use_mock_models: true
-  deepseek_api_key: ""
+  use_mock_models: false
+  deepseek_api_key: "sk-cefb2b02c3764267ad713be741d3c49e"
   deepseek_base_url: https://api.deepseek.com
   deepseek_model: deepseek-v4-flash
-  qwen_api_key: ""
+  qwen_api_key: "sk-c0fb0b5273b24de7b880244e0d8a5765"
   qwen_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  qwen_vision_model: qwen3.6-plus
+  qwen_vision_model: qwen-vl-plus
   amap_key: ""
   request_timeout_seconds: 120
 

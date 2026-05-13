@@ -8,15 +8,15 @@ from app.schemas import AnalysisRequest, LocationChoice, UserProfile
 
 @pytest.mark.asyncio
 async def test_analysis_returns_food_boxes_cuisine_cost_and_health_advice(tmp_path: Path):
+    image_path = str(tmp_path / "food.jpg")
     service = AnalysisService.mocked()
     request = AnalysisRequest(
         image_id="img_1",
-        image_path=str(tmp_path / "food.jpg"),
         user_profile=UserProfile(conditions=["diabetes"], goals=["控糖"]),
         location_choice=LocationChoice(kind="home"),
     )
 
-    result = await service.analyze(request)
+    result = await service.analyze(request, image_path)
 
     assert result.image_id == "img_1"
     assert result.total_calories_range.endswith("kcal")
@@ -30,10 +30,10 @@ async def test_analysis_returns_food_boxes_cuisine_cost_and_health_advice(tmp_pa
 
 @pytest.mark.asyncio
 async def test_analysis_includes_restaurant_summary_when_restaurant_selected(tmp_path: Path):
+    image_path = str(tmp_path / "food.jpg")
     service = AnalysisService.mocked()
     request = AnalysisRequest(
         image_id="img_2",
-        image_path=str(tmp_path / "food.jpg"),
         user_profile=UserProfile(conditions=[]),
         location_choice=LocationChoice(
             kind="restaurant",
@@ -42,7 +42,7 @@ async def test_analysis_includes_restaurant_summary_when_restaurant_selected(tmp
         ),
     )
 
-    result = await service.analyze(request)
+    result = await service.analyze(request, image_path)
 
     assert result.restaurant_summary is not None
     assert result.restaurant_summary.source_type == "poi_and_public_snippets"
@@ -57,9 +57,9 @@ async def test_location_choices_without_restaurant_do_not_fabricate_review_summa
         result = await service.analyze(
             AnalysisRequest(
                 image_id=f"img_{kind}",
-                image_path=str(tmp_path / f"{kind}.jpg"),
                 user_profile=UserProfile(),
                 location_choice=LocationChoice(kind=kind),
-            )
+            ),
+            str(tmp_path / f"{kind}.jpg"),
         )
         assert result.restaurant_summary is None

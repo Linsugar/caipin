@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -66,10 +67,46 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+ENV_MAP = {
+    "QWEN_API_KEY": ("providers", "qwen_api_key"),
+    "QWEN_BASE_URL": ("providers", "qwen_base_url"),
+    "QWEN_VISION_MODEL": ("providers", "qwen_vision_model"),
+    "DEEPSEEK_API_KEY": ("providers", "deepseek_api_key"),
+    "DEEPSEEK_BASE_URL": ("providers", "deepseek_base_url"),
+    "DEEPSEEK_MODEL": ("providers", "deepseek_model"),
+    "AMAP_KEY": ("providers", "amap_key"),
+    "USE_MOCK_MODELS": ("providers", "use_mock_models"),
+    "CLIENT_KEYS": ("security", "client_keys"),
+    "RATE_LIMIT_PER_MINUTE": ("security", "rate_limit_per_minute"),
+    "DATABASE_URL": ("database", "url"),
+    "REDIS_URL": ("redis", "url"),
+}
+
+
+def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
+    for env_var, (section, key) in ENV_MAP.items():
+        value = os.environ.get(env_var)
+        if value is not None:
+            data.setdefault(section, {})[key] = _coerce_env(value, type(data.get(section, {}).get(key)))
+    return data
+
+
+def _coerce_env(value: str, sample: object) -> Any:
+    if isinstance(sample, bool):
+        return value.lower() in ("1", "true", "yes")
+    if isinstance(sample, int):
+        return int(value)
+    if isinstance(sample, list):
+        return [v.strip() for v in value.split(",") if v.strip()]
+    return value
+
+
 @lru_cache(maxsize=1)
 def load_config(config_path: str | None = None) -> AppConfig:
     path = Path(config_path or "config/app.yml")
     data: dict[str, Any] = {}
     if path.exists():
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return AppConfig.model_validate(_deep_merge(AppConfig().model_dump(), data))
+    merged = _deep_merge(AppConfig().model_dump(), data)
+    merged = _apply_env_overrides(merged)
+    return AppConfig.model_validate(merged)

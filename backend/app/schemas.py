@@ -66,7 +66,6 @@ class RestaurantSummary(BaseModel):
 
 class AnalysisRequest(BaseModel):
     image_id: str
-    image_path: str
     user_profile: UserProfile = Field(default_factory=UserProfile)
     location_choice: LocationChoice = Field(default_factory=LocationChoice)
 

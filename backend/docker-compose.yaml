@@ -7,6 +7,12 @@ services:
     container_name: food-analysis-api
     environment:
       TZ: Asia/Shanghai
+      # 填入你的真实 Key，YAML 里的值会被环境变量覆盖
+      QWEN_API_KEY: ""
+      DEEPSEEK_API_KEY: ""
+      # AMAP_KEY: ""
+      # USE_MOCK_MODELS: "true"
+      # CLIENT_KEYS: "my-secret-key"
     ports:
       - "8000:8000"
     volumes:

@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import redis
@@ -17,6 +18,15 @@ from app.security import SecurityService, get_client_identity
 from app.storage import LocalImageStorage, StorageError
 
 
+def _setup_logging() -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    # Avoid duplicate logs if create_app gets called multiple times
+    logger.propagate = False
+
+
 def create_app(
     testing: bool = False,
     storage_root: str | Path | None = None,
@@ -24,6 +34,7 @@ def create_app(
     analysis_service: AnalysisService | None = None,
 ) -> FastAPI:
     config = load_config()
+    _setup_logging()
     if testing:
         config.providers.use_mock_models = True
         config.security.client_keys = ["dev-client-key"]
@@ -67,6 +78,15 @@ def create_app(
 
         return dependency
 
+    def _resolve_image_path(image_id: str, db: Session | None) -> str | None:
+        if image_id in image_index:
+            return str(storage.absolute_path(image_index[image_id].relative_path))
+        if db is not None:
+            record = db.query(UploadedImage).filter_by(image_id=image_id).first()
+            if record is not None:
+                return str(storage.absolute_path(record.relative_path))
+        return None
+
     @app.get("/health")
     def health() -> dict:
         dependencies = {"mysql": "skipped" if testing else "ok", "redis": "skipped" if testing else "ok"}
@@ -109,15 +129,19 @@ def create_app(
         _: str = Depends(protect("analyze", count_daily_analysis=True)),
         db: Session | None = Depends(get_db),
     ):
-        if request.image_id in image_index and not Path(request.image_path).exists():
-            request.image_path = str(storage.absolute_path(image_index[request.image_id].relative_path))
+        image_path = _resolve_image_path(request.image_id, db)
+        if image_path is None:
+            raise HTTPException(status_code=404, detail="image not found")
 
         try:
-            result = await analysis_service.analyze(request)
+            result = await analysis_service.analyze(request, image_path)
         except ProviderTimeoutError as exc:
             raise HTTPException(status_code=504, detail=str(exc)) from exc
         except ProviderHTTPError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:
+            log_json("ANALYZE_ERROR", {"error": str(exc), "type": type(exc).__name__})
+            raise HTTPException(status_code=500, detail=f"analysis failed: {exc}") from exc
         if db is not None:
             db.add(
                 AnalysisRecord(

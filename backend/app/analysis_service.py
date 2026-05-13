@@ -25,8 +25,8 @@ class AnalysisService:
     def mocked(cls) -> "AnalysisService":
         return cls(MockVisionProvider(), MockReasoningProvider())
 
-    async def analyze(self, request: AnalysisRequest) -> AnalysisResult:
-        foods = await self.vision.detect_foods(request.image_path)
+    async def analyze(self, request: AnalysisRequest, image_path: str) -> AnalysisResult:
+        foods = await self.vision.detect_foods(image_path)
         reasoning_payload = {
             "image_id": request.image_id,
             "foods": [food.model_dump() for food in foods],

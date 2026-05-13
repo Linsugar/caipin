@@ -26,7 +26,21 @@ def _parse_json_content(content: object) -> Any:
         return content
     if not isinstance(content, str):
         raise ValueError("model response content is not JSON")
-    return json.loads(content)
+    # 清理 markdown 代码块包裹
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```").strip()
+        if text.endswith("```"):
+            text = text[:-3].strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # 尝试提取第一个 JSON 对象
+        import re as _re
+        m = _re.search(r'\{.*\}', text, _re.DOTALL)
+        if m:
+            return json.loads(m.group())
+        raise
 
 
 def _split_guess(value: object) -> list[str]:
@@ -61,14 +75,28 @@ def _normalize_bbox(value: object) -> dict[str, object]:
 
 
 def normalize_vision_foods(raw: object) -> list[FoodItem]:
-    items = raw.get("foods", []) if isinstance(raw, dict) else raw
-    if not isinstance(items, list):
+    all_items: list[dict] = []
+
+    def _collect(obj: object, category: str = "") -> None:
+        if isinstance(obj, list):
+            for elem in obj:
+                _collect(elem, category)
+        elif isinstance(obj, dict):
+            if "name" in obj:
+                all_items.append({"category": category, **obj})
+            for key, value in obj.items():
+                if isinstance(value, (list, dict)):
+                    _collect(value, key.rstrip("s") if isinstance(value, list) else category)
+
+    _collect(raw)
+    if not all_items:
+        return []
+
+    if not all_items:
         return []
 
     normalized: list[FoodItem] = []
-    for index, item in enumerate(items, start=1):
-        if not isinstance(item, dict):
-            continue
+    for index, item in enumerate(all_items, start=1):
         normalized.append(
             FoodItem.model_validate(
                 {
@@ -103,27 +131,41 @@ def _guess_cuisine(food_names: list[str]) -> dict[str, object]:
 
 
 def normalize_reasoning_summary(raw: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-    if all(key in raw for key in ["foods", "cuisine", "total_calories_range", "total_cost_range", "health_advice"]):
-        return raw
+    # Build lookup from DeepSeek's foods array (keyed by id or index)
+    reasoning_foods = raw.get("foods") or raw.get("food_analyses") or []
+    reasoning_by_id: dict[str, dict] = {}
+    for i, item in enumerate(reasoning_foods):
+        if isinstance(item, dict):
+            key = item.get("id") or f"food_{i + 1}"
+            reasoning_by_id[key] = item
 
-    food_analyses = {
-        item.get("food_id") or item.get("id"): item
-        for item in raw.get("food_analyses", [])
-        if isinstance(item, dict)
-    }
     foods: list[dict[str, Any]] = []
     calories_parts: list[str] = []
     for food in payload.get("foods", []):
-        analysis = food_analyses.get(food.get("id"), {})
+        fid = food.get("id", "")
+        analysis = reasoning_by_id.get(fid, {})
         nutrition = analysis.get("nutrition_info", {}) if isinstance(analysis, dict) else {}
-        calories = nutrition.get("calories") or food.get("calories_range") or "热量不确定"
+        calories = (
+            nutrition.get("calories")
+            or analysis.get("calories")
+            or analysis.get("calories_range")
+            or food.get("calories_range")
+            or "热量不确定"
+        )
+        cost = (
+            nutrition.get("cost")
+            or analysis.get("cost")
+            or analysis.get("cost_range")
+            or food.get("cost_range")
+            or "成本不确定"
+        )
         calories_parts.append(str(calories))
-        risks = [_risk_to_text(risk) for risk in analysis.get("risks", [])] if isinstance(analysis, dict) else []
+        risks = [_risk_to_text(risk) for risk in (analysis.get("nutrition_risks") or analysis.get("risks") or [])] if isinstance(analysis, dict) else []
         foods.append(
             {
                 **food,
                 "calories_range": str(calories),
-                "cost_range": food.get("cost_range") or "成本不确定",
+                "cost_range": str(cost),
                 "nutrition_risks": [risk for risk in risks if risk],
             }
         )
@@ -248,7 +290,11 @@ class QwenVisionProvider(VisionProvider):
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "识别图片中的菜品，返回 JSON，包含 name,bbox,confidence,ingredients_guess,cooking_method_guess,portion_guess。"},
+                            {"type": "text", "text": (
+    "识别图片中所有可见的物品，按类别分组返回 JSON。类别可包括 foods（菜品）、fruits（水果）、drinks（饮品）等。"
+    "每个物品返回 name、bbox（[x1,y1,x2,y2] 像素坐标）、confidence、ingredients_guess、cooking_method_guess、portion_guess。"
+    "示例：{\"foods\":[{\"name\":\"红烧肉\",\"bbox\":[292,224,574,450],\"confidence\":0.9,\"ingredients_guess\":[\"猪肉\"],\"cooking_method_guess\":\"炖\",\"portion_guess\":\"中份\"}],\"fruits\":[{\"name\":\"苹果\",\"bbox\":[100,50,200,150],\"confidence\":0.85,\"ingredients_guess\":[\"苹果\"],\"cooking_method_guess\":\"生食\",\"portion_guess\":\"一个\"}]}"
+)},
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -275,7 +321,11 @@ class QwenVisionProvider(VisionProvider):
         except httpx.HTTPStatusError as exc:
             raise ProviderHTTPError(f"qwen vision request failed: {exc.response.text[:500]}") from exc
         content = response.json()["choices"][0]["message"]["content"]
-        parsed = _parse_json_content(content)
+        try:
+            parsed = _parse_json_content(content)
+        except (json.JSONDecodeError, ValueError) as exc:
+            log_json("QWEN_PARSE_ERROR", {"error": str(exc), "content": content[:500]})
+            return await MockVisionProvider().detect_foods(image_path)
         foods = normalize_vision_foods(parsed)
         if not foods:
             return await MockVisionProvider().detect_foods(image_path)
@@ -290,12 +340,25 @@ class DeepSeekReasoningProvider(ReasoningProvider):
         if not self.config.deepseek_api_key:
             return await MockReasoningProvider().summarize_analysis(payload)
 
+        import json as _json
+
+        system_prompt = (
+            "你是饮食分析后端。输入是图片中识别到的菜品列表（含菜名、坐标、置信度、食材、做法、份量）。"
+            "请为每道菜估算热量和成本，并输出以下 JSON 格式：\n"
+            '{"foods":[{"id":"food_1","name":"番茄炒蛋","calories_range":"220-320 kcal","cost_range":"5-9 元","nutrition_risks":["油脂偏高"]}],'
+            '"cuisine":{"primary_type":"家常菜","secondary_type":null,"confidence":0.8,"evidence":["根据菜品判断"]},'
+            '"total_calories_range":"400-580 kcal","total_cost_range":"6-12 元","cost_confidence":0.7,'
+            '"health_advice":{"summary":"整体建议","suggestions":["建议1"]},'
+            '"uncertainty_notes":["热量和成本为估算值"]}\n'
+            "只输出 JSON，不要任何额外文字。"
+        )
+
         try:
             request_payload = {
                 "model": self.config.deepseek_model,
                 "messages": [
-                    {"role": "system", "content": "你是饮食分析后端，只输出符合约定 schema 的 JSON。健康建议必须谨慎，不做医疗诊断。"},
-                    {"role": "user", "content": str(payload)},
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": _json.dumps(payload, ensure_ascii=False)},
                 ],
                 "response_format": {"type": "json_object"},
             }
@@ -313,4 +376,9 @@ class DeepSeekReasoningProvider(ReasoningProvider):
         except httpx.HTTPStatusError as exc:
             raise ProviderHTTPError(f"deepseek reasoning request failed: {exc.response.text[:500]}") from exc
         content = response.json()["choices"][0]["message"]["content"]
-        return normalize_reasoning_summary(_parse_json_content(content), payload)
+        try:
+            parsed = _parse_json_content(content)
+            return normalize_reasoning_summary(parsed, payload)
+        except (json.JSONDecodeError, ValueError) as exc:
+            log_json("DEEPSEEK_PARSE_ERROR", {"error": str(exc), "content": content[:500]})
+            return await MockReasoningProvider().summarize_analysis(payload)
